@@ -4,22 +4,24 @@ import argparse
 import csv
 import datetime
 import logging
+import re
 
 from bs4 import BeautifulSoup
 import requests
+import six
 
 # Setup logging
 logger = logging.getLogger('tickets-londontheatre-bot')
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.INFO)
 logger.addHandler(ch)
 
 # Global variables
 # 6168 is show ID for Hamlet
 # date range 29/06/2017 - 02/09/2017
-
+validShowIdPattern = re.compile(r'^\d{4}$')
 
 # Utility functions
 def daterange(start_date, end_date):
@@ -29,31 +31,80 @@ def daterange(start_date, end_date):
     for n in range(int ((end_date - start_date).days)):
         yield start_date + datetime.timedelta(n)
 
-def parseHtml(html_page):
+def requestHtml(url):
     '''
-    Parse a HTML page into a list of dicts    
+    Request a HTML url and return the text content
     '''
-    logger.debug("Parsing HTML page")
-    soup = BeautifulSoup(html_page, "html.parser")
-    table = soup.find("table", attrs={"data-id": "seats-table"})
-    tickets = []
-    if table:
-        for row in table.tbody.find_all("tr"):
-            cols = row.find_all("td")
-            ticket = {
-                "time": cols[0].text,
-                "area": cols[1].div.text,
-                "seats": cols[2].span.text,
-                "price": cols[3].find(text=True, recursive=False)
-            }
-            tickets.append(ticket)
-    else:
-        logger.debug("No tickets data table found in page")
-    return tickets
-
+    logger.debug("Getting HTML; {0}".format(url))
+    r = requests.get(url)
+    return r.text
 
 # Main script
 
+def availableShows():
+    '''
+    Find a dictionary of available shows
+    '''
+    logger.debug("Getting a list of shows")
+    html = requestHtml("http://tickets.londontheatre.co.uk/")
+    soup = BeautifulSoup(html, "html.parser")
+    selectList = soup.find("select", attrs={"id": "edit-show"})
+    shows = {}
+    for option in selectList.find_all("option"):
+        showId = option['value']
+        showName = option.text
+        if re.match(validShowIdPattern, showId):
+            shows[showId] = showName
+        else:
+            logger.debug("Discarding invalid showId; {0}".format(showId))
+    return shows
+
+
+class ShowDatePage(object):
+    def __init__(self, showId, pageDate, ticketQuantity):
+        self.logger = logging.getLogger('tickets-londontheatre-bot.ShowDatePage')
+
+        self.showId = showId
+        self.pageDate = pageDate
+        self.ticketQuantity = ticketQuantity
+
+    def html(self):
+        '''
+        Get a single string representing the HTML contents of the page on a single date
+        '''
+        self.logger.debug("Getting ShowDate HTML page")
+        complete_url = 'http://tickets.londontheatre.co.uk/book/availability/{showId}/134/{ticketQuantity}?bookingDate={ticketDate}&type={ticketType}'.format(
+                        ticketDate=self.pageDate,
+                        showId=self.showId,
+                        ticketQuantity=self.ticketQuantity,
+                        ticketType='A')
+        return requestHtml(complete_url)
+
+    def tickets(self):
+        '''
+        Get a list of dictionaries with tickets available on a single date
+        '''
+        html = self.html()
+        self.logger.debug("Parsing ShowDate page")
+
+        soup = BeautifulSoup(html, "html.parser")
+        table = soup.find("table", attrs={"data-id": "seats-table"})
+        tickets = []
+        if table:
+            for row in table.tbody.find_all("tr"):
+                cols = row.find_all("td")
+                ticket = {
+                    "time": cols[0].text,
+                    "area": cols[1].div.text,
+                    "seats": cols[2].span.text,
+                    "price": cols[3].find(text=True, recursive=False),
+                    "showId": self.showId,
+                    "date": self.pageDate.strftime("%Y%m%d")
+                }
+                tickets.append(ticket)
+        else:
+            self.logger.debug("No tickets data table found in page")
+        return tickets
 
 class Bot(object):
     '''
@@ -71,56 +122,28 @@ class Bot(object):
         self.dateFrom = dateFrom if dateFrom else datetime.date.today()
         self.dateTo = dateTo if dateTo else (datetime.date.today() + datetime.timedelta(90))
 
-    def requestHtmlSingle(self, single_date):
-        '''
-        Get a single string representing the HTML contents of the page on a single date
-        '''
-        self.logger.debug("Getting single HTML page")
-        complete_url = 'http://tickets.londontheatre.co.uk/book/availability/{showId}/134/{ticketQuantity}?bookingDate={ticketDate}&type={ticketType}'.format(
-                        ticketDate=single_date.strftime("%Y%m%d"),
-                        showId=self.showId,
-                        ticketQuantity=self.ticketQuantity,
-                        ticketType='A')
-        logger.debug("Getting HTML")
-        r = requests.get(complete_url)
-        return r.text
-
-    def requestTicketsSingle(self, single_date):
-        '''
-        Get a list of dictionaries with tickets available on a single date
-        '''
-        html = self.requestHtmlSingle(single_date)
-        tickets = parseHtml(html)
-        rows = [dict(date=single_date.strftime("%Y%m%d"), showId=self.showId, **ticket) for ticket in tickets]
-        return rows
-
-    def requestTickets(self):
+    def tickets(self):
         tickets = []
         for single_date in daterange(self.dateFrom, self.dateTo):
-            tickets.extend(self.requestTicketsSingle(single_date))
+            page = ShowDatePage(self.showId, single_date.strftime("%Y%m%d"), self.ticketQuantity)
+            pageTickets = page.tickets()
+            tickets.extend(pageTickets)
         return tickets
 
+# Subcommands
 
-def main_parser():
-    logger.debug("Generating argument parser")
-    parser = argparse.ArgumentParser(description="Scrape tickets.londontheatre.co.uk")
-    parser.add_argument("outfile", help="CSV file to write tickets data to")
-    parser.add_argument("showId", help="ID of show to scrape")
-    parser.add_argument("-n", "--number-tickets", default=2, type=int, help="Number of tickets required")
-    parser.add_argument("-f", "--from-date", default=None, help="Date YYYYMMDD to search from (inclusive)")
-    parser.add_argument("-t", "--to-date", default=None, help="Date YYYMMDD to search to (exclusive)")
-    return parser
+def shows(args):
+    showList = [v for k, v in six.iteritems(availableShows())]
+    for show in sorted(showList):
+        print(show)
 
-def main():
-    parser = main_parser()
-    args = parser.parse_args()
-
+def search(args):
     dateFrom, dateTo = [datetime.datetime.strptime(date_string, "%Y%m%d").date() if date_string else date_string for date_string in [args.from_date, args.to_date]]
     ltlBot = Bot(args.showId,
                 ticketQuantity=args.number_tickets,
                 dateFrom=dateFrom,
                 dateTo=dateTo)
-    ticketRows = ltlBot.requestTickets()
+    ticketRows = ltlBot.tickets()
     fieldnames = sorted(list(set(k for d in ticketRows for k in d)))
 
     outfile = args.outfile
@@ -132,6 +155,35 @@ def main():
         logger.debug("Writing ticket rows")
         for row in ticketRows:
             writer.writerow(row)
+
+# Main
+
+def main_parser():
+    logger.debug("Generating argument parser")
+    parser = argparse.ArgumentParser(description="Scrape tickets.londontheatre.co.uk")
+    subparsers = parser.add_subparsers()
+
+    parser_shows = subparsers.add_parser('shows')
+    parser_shows.set_defaults(func=shows)
+   
+    parser_search = subparsers.add_parser('search')
+    parser_search.set_defaults(func=search)
+    parser_search.add_argument("outfile", help="CSV file to write tickets data to")
+    parser_search.add_argument("showId", help="ID of show to scrape")
+    parser_search.add_argument("-n", "--number-tickets", default=2, type=int, help="Number of tickets required")
+    parser_search.add_argument("-f", "--from-date", default=None, help="Date YYYYMMDD to search from (inclusive)")
+    parser_search.add_argument("-t", "--to-date", default=None, help="Date YYYMMDD to search to (exclusive)")
+
+    return parser
+
+def main():
+    parser = main_parser()
+    args = parser.parse_args()
+    logger.debug(args)
+    try:
+        args.func(args)
+    except AttributeError as e:
+        parser.parse_args(['-h'])
 
 if __name__ == "__main__":
     main()
