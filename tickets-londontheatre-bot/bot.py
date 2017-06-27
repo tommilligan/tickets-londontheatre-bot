@@ -45,7 +45,7 @@ def availableShows():
     '''
     Find a dictionary of available shows
     '''
-    logger.debug("Getting a list of shows")
+    logger.debug("Scraping a list of shows")
     html = requestHtml("http://tickets.londontheatre.co.uk/")
     soup = BeautifulSoup(html, "html.parser")
     selectList = soup.find("select", attrs={"id": "edit-show"})
@@ -54,7 +54,7 @@ def availableShows():
         showId = option['value']
         showName = option.text
         if re.match(validShowIdPattern, showId):
-            shows[showId] = showName
+            shows[showName] = showId
         else:
             logger.debug("Discarding invalid showId; {0}".format(showId))
     return shows
@@ -74,7 +74,7 @@ class ShowDatePage(object):
         '''
         self.logger.debug("Getting ShowDate HTML page")
         complete_url = 'http://tickets.londontheatre.co.uk/book/availability/{showId}/134/{ticketQuantity}?bookingDate={ticketDate}&type={ticketType}'.format(
-                        ticketDate=self.pageDate,
+                        ticketDate=self.pageDate.strftime("%Y%m%d"),
                         showId=self.showId,
                         ticketQuantity=self.ticketQuantity,
                         ticketType='A')
@@ -124,8 +124,9 @@ class Bot(object):
 
     def tickets(self):
         tickets = []
-        for single_date in daterange(self.dateFrom, self.dateTo):
-            page = ShowDatePage(self.showId, single_date.strftime("%Y%m%d"), self.ticketQuantity)
+        for i, single_date in enumerate(daterange(self.dateFrom, self.dateTo)):
+            self.logger.info("Reading page {0} of tickets".format(i))
+            page = ShowDatePage(self.showId, single_date, self.ticketQuantity)
             pageTickets = page.tickets()
             tickets.extend(pageTickets)
         return tickets
@@ -133,13 +134,18 @@ class Bot(object):
 # Subcommands
 
 def shows(args):
-    showList = [v for k, v in six.iteritems(availableShows())]
+    logger.info("Looking for shows")
+    showList = [k for k, v in six.iteritems(availableShows())]
     for show in sorted(showList):
         print(show)
 
 def search(args):
+    logger.info("Searching for tickets")
+    # Interpret user input
     dateFrom, dateTo = [datetime.datetime.strptime(date_string, "%Y%m%d").date() if date_string else date_string for date_string in [args.from_date, args.to_date]]
-    ltlBot = Bot(args.showId,
+    showId = availableShows()[args.show]
+
+    ltlBot = Bot(showId,
                 ticketQuantity=args.number_tickets,
                 dateFrom=dateFrom,
                 dateTo=dateTo)
@@ -169,7 +175,7 @@ def main_parser():
     parser_search = subparsers.add_parser('search')
     parser_search.set_defaults(func=search)
     parser_search.add_argument("outfile", help="CSV file to write tickets data to")
-    parser_search.add_argument("showId", help="ID of show to scrape")
+    parser_search.add_argument("show", help="Name of show to scrape")
     parser_search.add_argument("-n", "--number-tickets", default=2, type=int, help="Number of tickets required")
     parser_search.add_argument("-f", "--from-date", default=None, help="Date YYYYMMDD to search from (inclusive)")
     parser_search.add_argument("-t", "--to-date", default=None, help="Date YYYMMDD to search to (exclusive)")
@@ -183,6 +189,7 @@ def main():
     try:
         args.func(args)
     except AttributeError as e:
+        raise
         parser.parse_args(['-h'])
 
 if __name__ == "__main__":
