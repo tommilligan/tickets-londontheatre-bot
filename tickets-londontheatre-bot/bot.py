@@ -15,7 +15,7 @@ logger = logging.getLogger('tickets-londontheatre-bot')
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-ch.setLevel(logging.INFO)
+ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 # Global variables
@@ -36,7 +36,7 @@ def requestHtml(url):
     Request a HTML url and return the text content
     '''
     logger.debug("Getting HTML; {0}".format(url))
-    r = requests.get(url)
+    r = requests.get(url, headers={'Host': "tickets.londontheatre.co.uk"})
     return r.text
 
 # Main script
@@ -120,7 +120,7 @@ class Bot(object):
         self.ticketQuantity = ticketQuantity
 
         self.dateFrom = dateFrom if dateFrom else datetime.date.today()
-        self.dateTo = dateTo if dateTo else (datetime.date.today() + datetime.timedelta(90))
+        self.dateTo = dateTo if dateTo else (self.dateFrom + datetime.timedelta(90))
 
     def tickets(self):
         tickets = []
@@ -144,7 +144,7 @@ def search(args):
     # Interpret user input
     dateFrom, dateTo = [datetime.datetime.strptime(date_string, "%Y%m%d").date() if date_string else date_string for date_string in [args.from_date, args.to_date]]
     showId = availableShows()[args.show]
-
+    logger.debug("Show name {0} is id {1}".format(args.show, showId))
     ltlBot = Bot(showId,
                 ticketQuantity=args.number_tickets,
                 dateFrom=dateFrom,
